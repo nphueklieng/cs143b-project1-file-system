@@ -1,4 +1,4 @@
-# CS 143B - Project 1 (main.py)
+# CS 143B - Project 1 (emulated_disk.py)
 # Name: Duangchanok Phueklieng (45231967)
 
 class EmulatedDisk:
@@ -10,10 +10,3 @@ class EmulatedDisk:
 
     def write_block (self):
         pass
-
-
-def main ():
-    pass
-
-if __name__ == '__main__':
-    main()
