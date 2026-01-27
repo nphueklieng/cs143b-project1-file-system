@@ -21,8 +21,6 @@ def initialize ():
     FS = FileSystem()
 
     # Descriptor 0: Directory (Initially with length 0 and block 7 allocated)
-    
-    DISK.D[1] = 0
 
 def eval (user_input):
     command = user_input[0]
