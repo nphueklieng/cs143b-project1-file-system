@@ -1,12 +1,21 @@
 # CS 143B - Project 1 (main.py)
 # Name: Duangchanok Phueklieng (45231967)
 
-# Byte Array D[64][512] to represent emulated disk
+class EmulatedDisk (self):
+    def __init__(self):
+        self.disk = [bytearray(512) for block in range(64)]
 
+    def read_block(self):
+        pass
+
+    def write_block(self):
+        pass
+    
 def initialize ():
     '''
-    At start-up, initialize the system as specified
+    At start-up, initialize system
     '''
+
 
 
 def main ():
