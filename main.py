@@ -13,10 +13,9 @@ def initialize ():
     DISK = EmulatedDisk()
     global FS
     FS = FileSystem()
-
-    # Descriptor 0: Directory (Initially with length 0 and block 7 allocated)
-    DISK.allocate_block(block=7, descriptor=0)
-
+    # All descriptors initially free (set descriptor file sizes to -1)
+    # Descriptor 0: Directory (Initially with size 0 and block 7 allocated)
+    # Remaining blocks 8-63 free (set bitmap)
 
 def eval (user_input):
     command = user_input[0]
