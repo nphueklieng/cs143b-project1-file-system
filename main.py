@@ -7,12 +7,6 @@ from file_system import FileSystem
 DISK = None
 FS = None
 
-# Bitmap Mask Array
-MASK = [0] * 64
-MASK[63] = 0x0001
-for i in range (62, 0, -1):
-    MASK[i] = MASK[i + 1] << 1
-
 def initialize ():
     ''' Initialize system at start-up '''
     global DISK
@@ -21,6 +15,8 @@ def initialize ():
     FS = FileSystem()
 
     # Descriptor 0: Directory (Initially with length 0 and block 7 allocated)
+    DISK.allocate_block(block=7, descriptor=0)
+
 
 def eval (user_input):
     command = user_input[0]
