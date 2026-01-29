@@ -19,6 +19,7 @@ DIR_ENTRY_SIZE = 8 # bytes
 FILE_NAME_SIZE = 4 # bytes
 DESCRIPTOR_SIZE = 16 # bytes
 INT_SIZE = 4 # bytes
+MAX_FILE_SIZE = 512 * 3 # bytes
 
 # Bitmap
 
@@ -75,6 +76,7 @@ def write_block (b):
 
 # File System
 
+
 class OFTEntry:
     def __init__ (self):
         self.rw_buffer = bytearray(512)
@@ -88,23 +90,36 @@ class OFTEntry:
         block_index = get_descriptor_blocks(self.descriptor_index)[n]  # Current position is in Disk block i
         return block_index
     
-    def write_buffer_to_disk (self):
+    def copy_buffer_to_disk (self):
         ''' Copy the current buffer contents to the block '''
         global O
         block = self.determine_block_in_buffer()
         O[:] = self.rw_buffer[:]   # copy r/w buffer to O
         write_block(block)   # Write O to D[block]
 
+    def copy_block_to_buffer (self, block):
+        ''' Load disk block into the OFT r/w buffer '''
+        global I
+        read_block(block)  # Now block is in I
+        self.rw_buffer[:] = I[:]
+
+    def copy_next_block_to_buffer (self):
+        ''' Copy the next block to the r/w buffer '''
+        n = self.position // 512   # which block we need next
+        block_index = get_descriptor_blocks(self.descriptor_index)[n]
+        self.copy_block_to_buffer(block_index)
+        
+
 def read_memory (mem, count):
     ''' Return data read. Copy count bytes from memory M starting with position mem to output device'''
     global M
-    return M[mem : mem + count]
+    return M[mem : mem + count - 1]
 
 def write_memory (mem, str):
     ''' Return num bytes written. Copy string str into memory M starting with position mem from input device'''
     global M
     n = len(str)
-    M[mem : mem + n] = str
+    M[mem : mem + n - 1] = str
     return n
 
 def check_directory_entry_exists (name):
@@ -138,7 +153,7 @@ def get_descriptor_location(i):
     return block, offset
 
 def get_descriptor_size (i):
-    ''' Assign descriptor i to new file '''
+    ''' return the size field in descriptor i'''
     global I
     block, offset = get_descriptor_location(i)
     read_block(block)
@@ -273,17 +288,20 @@ def create_oft_entry (entry, descriptor, file_size):
 def create (name):
     ''' Create a new file with the name name '''
     if check_directory_entry_exists(name):  # Check if file already exists
-        raise Exception("error: duplicate file name")
-    i = find_free_descriptor  # Search for free file descriptor i
+        print("error: duplicate file name")
+        return -1
+    i = find_free_descriptor()  # Search for free file descriptor i
     if i == -1:
-        raise Exception("error: too many files")
-    assign_descriptor(i)  # If free descriptor i found, assign i to new file
+        print("error: too many files")
+        return -1
     position = find_free_directory_entry()  # Search for free directory entry j
     if position == -1:
-        raise Exception("error: no free directory found")
-    else:
-        write_directory_entry(position, name, i)  # Record info in the directory entry
-    return name
+        print("error: no free directory found")
+        return -1
+    assign_descriptor(i)  # If free descriptor i found, assign i to new file
+    write_directory_entry(position, name, i)  # Record info in the directory entry
+    print(f"Success: file {name} created")
+    return 0
 
 def destroy (name):
     ''' Destroy existing file <name> assuming file is not open '''
@@ -297,49 +315,118 @@ def destroy (name):
             i = read_memory(FILE_NAME_SIZE, INT_SIZE)  # Descriptor index
             free_descriptor(i)
             write_memory(0, 0)  # mark directory entry as free by setting name field to 0
-            return name
-    raise Exception ("error: file does not exist")
+            print(f"Success: file {name} destroyed")
+            return 0
+    print("error: file does not exist")
+    return -1
 
 def open (name):
     ''' Open file name '''
     # Search directory for file name and get the descriptor i
     i = find_directory_entry(name)
     if i == -1:
-        raise Exception("error: file does not exist")
+        print("error: file does not exist")
+        return -1
     # Search for free OFT entry j
     j = find_free_oft_entry()
     if j == -1:
-        raise Exception("error: too many files open")
+        print("error: too many files open")
+        return -1
     file_size = get_descriptor_size(i)
     create_oft_entry(j, i, file_size)
-    return name
+    print(f"Success: file {name} opened at index {j}")
+    return 0
 
 def close (i):
     ''' Close file where OFT index is i, reversing the steps of open '''
-    OFT[i].write_buffer_to_disk()
+    OFT[i].copy_buffer_to_disk()
     update_descriptor_size(OFT[i].descriptor, OFT[i].file_size)
     OFT[i].position = -1   # Mark OFT entry as free
-    return i
+    print(f"Success: file {i} closed")
+    return 0
 
 def read (i, m, n):
     ''' Copy n bytes from open file i (starting at current position) to memory M (start at M[m]) '''
-    pass
+    global OFT
+    size = OFT[i].fle_size
+    count = 0  # How many bytes read?
+    while True:
+        buf_position = OFT[i].position % 512  # position in rw buffer
+        if count == n or OFT[i].position >= size:  # Check EOF or all bytes read
+            bytes_read = read_memory(m, count)
+            print(f"Success: {bytes_read}")
+            return 0
+        if buf_position == 0 and OFT[i].position != 0:  # Check end of r/w buffer reached
+            OFT[i].copy_buffer_to_disk()
+            OFT[i].copy_next_block_to_disk()
+            buf_position = 0  # Reset buffer position to start of the r/w buffer
+        write_memory(m + count, OFT[i].rw_buffer[buf_position + count])  # Write the byte from rw_buffer into M
+        count += 1
+        OFT[i].position += 1
 
 def write (i, m, n):
-    ''' Copy n bytes from memory M staarting at location m to open file i (starting at current position)'''
-    pass
+    ''' Copy n bytes from memory M starting at location m to open file i (starting at current position)'''
+    global OFT
+    d = OFT[i].descriptor_index
+    count = 0  # How many bytes written ?
+    while True:
+        buf_position = OFT[i] % 512  # Position in rw buffer
+        # Check desired count n reached or Max file size
+        if count == n or OFT[i].file_size >= MAX_FILE_SIZE:   
+            pos = OFT[i].position
+            if pos > OFT[i].file_size: # Update size in oft entry and descriptor
+                OFT[i].file_size = OFT[i].position
+                update_descriptor_size(d, pos)
+            print(f"Success: {count}")
+            return 0
+        # Check end of buffer reached
+        if buf_position == 0 and OFT[i].position != 0:
+            OFT[i].copy_buffer_to_disk()
+            n = OFT[i].position // 512  # Which block?
+            block = get_descriptor_blocks(d)[n] 
+            if block != 0:  # If the next block exists
+                OFT[i].copy_block_to_buffer(block)
+            else:  # allocate a new block to the file
+                block = find_free_block()
+                update_descriptor_block(d, n, block)
+                set_bitmap(block, 1)
+                OFT[i].rw_buffer = bytearray(512)  # New block means fresh r/w buffer
+            buf_position = 0  # Reset buffer position to start of the r/w buffer
+        OFT[i].rw_buffer[buf_position] = read_memory(m + count, 1)  # Read the byte from M into rw_buffer
+        count += 1
+        OFT[i].position += 1
 
 def seek (i, p):
     ''' Move current position within open file i to new position p '''
-    pass
+    if p > OFT[i].file_size:
+        print("error: current position is past the end of file")
+        return -1
+    # Check file blocks (b0, b1, b2)
+    curr_block = OFT[i].position // 512
+    new_block = p // 512
+    if curr_block != new_block:
+        b = get_descriptor_blocks(OFT[i].descriptor)[new_block]  # Get its block index
+        OFT[i].copy_buffer_to_disk()
+        OFT[i].copy_block_to_buffer(b)
+    OFT[i].position = p
+    print(f"Success: current position is {p}")
+    return 0
 
 def directory ():
     ''' Display a list of all files and their sizes '''
-    pass
+    seek(0, 0)
+    dir_size = OFT[i].file_size
+    while OFT[i].position < dir_size:
+        read(0, 0, DIR_ENTRY_SIZE)  # Now dir entry is at M[0 : 8]
+        file_name = M[0 : 4]
+        descriptor_index = M[4 : 8]
+        file_size = get_descriptor_size(descriptor_index)
+        print(f"{file_name}: {file_size} Bytes")
+    return 0
 
 # Shell
 
-def initialize ():
+def init ():
     ''' Initialize system at start-up '''
     global D, I, O, M
     D = [bytearray(512) for block in range(64)]
@@ -347,41 +434,49 @@ def initialize ():
     O = bytearray(512)
     M = bytearray(512)
     OFT = [OFTEntry() for entry in range(4)]
-
     # All descriptors initially free (set descriptor file sizes to -1)
+    for d in range(192):
+        update_descriptor_size(d, -1)
     # Descriptor 0: Directory (Initially with size 0 and block 7 allocated)
-    # Remaining blocks 8-63 free (set bitmap)
+    update_descriptor_size(0, 0)
+    update_descriptor_block(d, 0, 7)
+    OFT[0].position = 0    # OFT[0] reserved for open directory
+    # Remaining blocks 8-63 free, but 0-7 are allocated (set bitmap)
+    for b in range(0, 7):
+        set_bitmap(b, 1)
 
-def eval (user_input):
-    command = user_input[0]
+
+
+def eval (input):
+    command = input[0]
     if command == "cr":
-        pass
+        create(input[1])
     elif command == "de":
-        pass
+        destroy(input[1])
     elif command == "op":
-        pass
+        open(input[1])
     elif command == "cl":
-        pass
+        close(input[1])
     elif command == "rd":
-        pass
+        read(input[1], input[2], input[3])
     elif command == "wr":
-        pass
+        write(input[1], input[2], input[3])
     elif command == "sk":
-        pass
+        seek(input[1], input[2])
     elif command == "dr":
-        pass
+        directory()
     elif command == "in":
-        pass
+        init()
     elif command == "rm":
-        pass
+        read_memory(input[1], input[2])
     elif command == "wm":
-        pass
+        write_memory(input[1], input[2])
     else:
         raise SyntaxError
 
 def main ():
     ''' Initialize system & run the Presentation/Test Shell '''
-    initialize()
+    init()
     while (True):
         try:
             user_input = input("").strip().split()  # Parse user input
