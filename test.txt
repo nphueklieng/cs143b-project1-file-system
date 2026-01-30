@@ -1,0 +1,16 @@
+in 
+wm 0 AAAAABBBBBCCCCCDDDDDEEEEEFFFFF
+cr fileA
+op fileA
+cr fileB
+op fileB
+wr 1 0 5
+wr 2 5 5
+sk 1 0
+sk 2 0
+rd 1 50 2
+rd 2 60 2
+sk 1 4
+rd 1 52 1
+rd 2 62 1
+rm 50 15

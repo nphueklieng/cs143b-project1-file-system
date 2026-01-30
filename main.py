@@ -29,7 +29,7 @@ MAX_FILE_SIZE = 512 * 3 # bytes
 
 MASK = [0] * 8  # 8-bit mask, it's for the byte array
 MASK[7] = 1
-for i in range (6, 0, -1):
+for i in range (6, -1, -1):
     MASK[i] = MASK[i + 1] << 1
 
 def locate_block_in_bitmap (block):
@@ -62,7 +62,7 @@ def set_bitmap (block, status):
 def find_free_block ():
     ''' Use the bitmap to find a free block and return its index '''
     for i in range(7, 64):  # There are 64 blocks, we skip the bitmap and descriptor blocks
-        if get_bitmap(i):
+        if get_bitmap(i) == 0:
             return i 
     return -1
 
@@ -90,7 +90,10 @@ class OFTEntry:
     
     def determine_block_in_buffer (self):
         ''' Determine which block is currently held in the rw_buffer. Return block index in disk'''
-        n = self.position // 512  # currently in the nth block in the file descriptor
+        if self.position > 0 and self.position % 512 == 0:  # Check if the buffer is just barely holding the previous block (boundary)
+            n = (self.position - 1) // 512
+        else:
+            n = self.position // 512  # currently in the nth block in the file descriptor
         block_index = get_descriptor_blocks(self.descriptor_index)[n]  # Current position is in Disk block i
         return block_index
     
@@ -98,6 +101,15 @@ class OFTEntry:
         ''' Copy the current buffer contents to the block '''
         global O
         block = self.determine_block_in_buffer()
+        if block == 0:
+            # Lazy allocation cus if its a new file the first block prob hasn't been allocated to the file yet
+            if self.position > 0 and self.position % 512 == 0:  # Check if the buffer is just barely holding the previous block (boundary)
+                n = (self.position - 1) // 512
+            else:
+                n = self.position // 512  # currently in the nth block in the file descriptor
+            block = find_free_block()
+            update_descriptor_block(self.descriptor_index, n, block)
+            set_bitmap(block, 1)
         O[:] = self.rw_buffer[:]   # copy r/w buffer to O
         write_block(block)   # Write O to D[block]
 
@@ -129,9 +141,8 @@ def write_memory (mem, str):
 def check_directory_entry_exists (name):
     ''' Check if file already exists '''
     global OFT
-    oft_entry = OFT[0]
     seek(0, 0)  # Move current position in directory to 0
-    while (oft_entry.position < oft_entry.file_size): # check EOF
+    while (OFT[0].position < OFT[0].file_size): # check EOF
         read(0, 512 - DIR_ENTRY_SIZE, DIR_ENTRY_SIZE) # Now next directory entry is at the end of M
         name_field = read_memory(512 - DIR_ENTRY_SIZE, 4)
         if name_field.decode('ascii') == name:
@@ -271,6 +282,7 @@ def find_free_oft_entry ():
     for i in range(len(OFT)):
         if OFT[i].position == -1:
             return i
+    return -1
 
 def create_oft_entry (entry, descriptor, file_size):
     ''' Create a new OFT entry for opening file '''
@@ -284,7 +296,7 @@ def create_oft_entry (entry, descriptor, file_size):
         set_bitmap(block, 1)
         OFT[entry].rw_buffer = bytearray(512)
     else:
-        block_numbers = get_descriptor_blocks(i)
+        block_numbers = get_descriptor_blocks(descriptor)
         read_block(block_numbers[0])  # Now first block is in I
         OFT[entry].rw_buffer[:] = I[:]  # Copy the first block of the file into the r/w buffer
 
@@ -331,9 +343,13 @@ def destroy (name):
 def open (name):
     ''' Open file name '''
     # Search directory for file name and get the descriptor i
+    global OFT
     i = find_directory_entry(name)
     if i == -1:
         raise FSError("error: file does not exist")
+    for i in range(1, 4):
+        if i == OFT[i].descriptor_index:
+            raise FSError("error: file alreaady open")
     # Search for free OFT entry j
     j = find_free_oft_entry()
     if j == -1:
@@ -353,6 +369,8 @@ def close (i):
 def read (i, m, n):
     ''' Copy n bytes from open file i (starting at current position) to memory M (start at M[m]) '''
     global OFT
+    if OFT[i].position == -1:
+        raise FSError("error: trying to read from unopened file")
     size = OFT[i].file_size
     count = 0  # How many bytes read?
     while True:
@@ -362,8 +380,7 @@ def read (i, m, n):
             return count, i
         if buf_position == 0 and OFT[i].position != 0:  # Check end of r/w buffer reached
             OFT[i].copy_buffer_to_disk()
-            OFT[i].copy_next_block_to_disk()
-            buf_position = 0  # Reset buffer position to start of the r/w buffer
+            OFT[i].copy_next_block_to_buffer()
         write_memory(m + count, OFT[i].rw_buffer[buf_position : buf_position + 1])  # Write the byte from rw_buffer into M
         count += 1
         OFT[i].position += 1
@@ -376,7 +393,7 @@ def write (i, m, n):
     while True:
         buf_position = OFT[i].position % 512  # Position in rw buffer
         # Check desired count n reached or Max file size
-        if count == n or OFT[i].file_size >= MAX_FILE_SIZE:   
+        if count == n or OFT[i].position >= MAX_FILE_SIZE:   
             pos = OFT[i].position
             if pos > OFT[i].file_size: # Update size in oft entry and descriptor
                 OFT[i].file_size = OFT[i].position
@@ -385,16 +402,15 @@ def write (i, m, n):
         # Check end of buffer reached
         if buf_position == 0 and OFT[i].position != 0:
             OFT[i].copy_buffer_to_disk()
-            n = OFT[i].position // 512  # Which block?
-            block = get_descriptor_blocks(d)[n] 
+            nth = OFT[i].position // 512  # nth block?
+            block = get_descriptor_blocks(d)[nth] 
             if block != 0:  # If the next block exists
                 OFT[i].copy_block_to_buffer(block)
             else:  # allocate a new block to the file
                 block = find_free_block()
-                update_descriptor_block(d, n, block)
+                update_descriptor_block(d, nth, block)
                 set_bitmap(block, 1)
                 OFT[i].rw_buffer = bytearray(512)  # New block means fresh r/w buffer
-            buf_position = 0  # Reset buffer position to start of the r/w buffer
         OFT[i].rw_buffer[buf_position : buf_position + 1] = read_memory(m + count, 1)  # Read the byte from M into rw_buffer
         count += 1 
         OFT[i].position += 1
@@ -408,8 +424,8 @@ def seek (i, p):
     curr_block = OFT[i].position // 512
     new_block = p // 512
     if curr_block != new_block:
-        b = get_descriptor_blocks(OFT[i].descriptor)[new_block]  # Get its block index
         OFT[i].copy_buffer_to_disk()
+        b = get_descriptor_blocks(OFT[i].descriptor_index)[new_block]  # Get its block index
         OFT[i].copy_block_to_buffer(b)
     OFT[i].position = p
     return p
@@ -447,7 +463,7 @@ def init ():
     update_descriptor_block(0, 0, 7)
     OFT[0].position = 0    # OFT[0] reserved for open directory
     # Remaining blocks 8-63 free, but 0-7 are allocated (set bitmap)
-    for b in range(0, 7):
+    for b in range(0, 8):
         set_bitmap(b, 1)
 
 
@@ -467,10 +483,10 @@ def eval (input):
         print(f"{index} closed")
     elif command == "rd":
         n, index = read(int(input[1]), int(input[2]), int(input[3]))
-        print(f"{n} bytes read from {index}")
+        print(f"{n} bytes read from file {index}")
     elif command == "wr":
         n, index = write(int(input[1]), int(input[2]), int(input[3]))
-        print(f"{n} bytes written to {index}")
+        print(f"{n} bytes written to file {index}")
     elif command == "sk":
         p = seek(int(input[1]), int(input[2]))
         print(f"position is {p}")
@@ -480,7 +496,7 @@ def eval (input):
         init()
         print("system initialized")
     elif command == "rm":
-        x = read_memory(int(input[1]), int(input[2])).decode('ascii').strip('\x00')
+        x = read_memory(int(input[1]), int(input[2])).replace(b'\x00', b' ').decode('ascii')  # output zeroed out bytes as spaces
         print(x)
     elif command == "wm":
         n = write_memory(int(input[1]), input[2].encode('ascii'))
